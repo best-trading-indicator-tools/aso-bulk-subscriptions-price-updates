@@ -143,6 +143,7 @@ python3 update_prices.py
 **Interactive prompts:**
 1. **Choose Pricing Index**: Select between Big Mac Index (default) or Netflix Index
 2. **Set Start Date**: Enter a future date (YYYY-MM-DD) or press Enter for tomorrow
+   - **Default behavior**: If no date is specified (press Enter), changes will be scheduled for tomorrow (next day)
    - Apple requires price changes to be scheduled at least 1 day in advance
    - Format: `2025-11-15`
 
@@ -150,7 +151,7 @@ python3 update_prices.py
 - Process all subscriptions listed in `SUBSCRIPTIONS_TO_UPDATE` from `.env`
 - Show a preview before each update
 - Ask for confirmation before applying changes
-- Schedule price changes for your specified date
+- Schedule price changes for your specified date (or tomorrow by default if no date provided)
 
 **Configuration**: Set `SUBSCRIPTIONS_TO_UPDATE` in your `.env` file to select which subscriptions to update. Format: `"ID1:Name1,ID2:Name2,ID3:Name3"`
 
@@ -292,7 +293,9 @@ SUBSCRIPTIONS_TO_UPDATE="6743152682:Annual Subscription,6743152701:Monthly Subsc
 ### Price Change Scheduling
 
 - **Future Dates Required**: After a subscription is approved, you cannot create immediate price changes. All changes must be scheduled for a future date (minimum 1 day ahead).
-- **Start Date Selection**: The `update_prices.py` script prompts you to enter a start date (YYYY-MM-DD format). Press Enter to use tomorrow's date as default.
+- **Start Date Selection**: The `update_prices.py` script prompts you to enter a start date (YYYY-MM-DD format). 
+  - **Default behavior**: If you press Enter without entering a date, changes will be scheduled for tomorrow (next day) by default
+  - **Custom date**: Enter a specific future date in YYYY-MM-DD format to schedule changes for that date
 - **Date Validation**: The script validates date format and ensures it's in the future. Invalid dates default to tomorrow.
 - **Propagation Delay**: API changes may take up to 1 hour to appear in App Store Connect dashboard (manual changes appear immediately).
 - **User Notification**: Apple automatically notifies users of price increases and may require consent in some regions.

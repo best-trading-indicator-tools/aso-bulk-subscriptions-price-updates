@@ -116,4 +116,36 @@ class AppStoreConnectAPI:
         
         data = self._make_request(endpoint, method="POST", json_data=json_data)
         return data.get("data", {})
+    
+    def delete_subscription_price(self, price_entry_id: str) -> Dict:
+        """
+        Delete a scheduled subscription price change
+        Uses DELETE /v1/subscriptionPrices/{id} endpoint
+        Reference: https://developer.apple.com/documentation/appstoreconnectapi/delete-v1-subscriptionprices-_id_
+        """
+        endpoint = f"/subscriptionPrices/{price_entry_id}"
+        url = f"{self.base_url}{endpoint}"
+        headers = {
+            "Authorization": f"Bearer {self._get_token()}",
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.delete(url, headers=headers)
+        if not response.ok:
+            error_msg = f"{response.status_code} {response.reason}"
+            try:
+                error_data = response.json()
+                if "errors" in error_data:
+                    error_details = error_data["errors"]
+                    error_msg += f": {error_details}"
+                else:
+                    error_msg += f": {error_data}"
+            except:
+                error_msg += f": {response.text[:500]}"
+            raise requests.exceptions.HTTPError(error_msg, response=response)
+        
+        # DELETE may return empty response (204 No Content)
+        if response.text:
+            return response.json()
+        return {"status": "deleted"}
 

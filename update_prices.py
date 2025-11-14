@@ -123,64 +123,57 @@ def get_usa_base_price(price_details):
             return detail.get("price", 0)
     return None
 
+def decode_price_point_id(price_point_id):
+    """Decode price point ID to extract subscription, territory, and tier code"""
+    try:
+        padded = price_point_id + '=='
+        decoded = base64.urlsafe_b64decode(padded)
+        data = json.loads(decoded)
+        return {
+            'subscription_id': data.get('s', ''),
+            'territory': data.get('t', ''),
+            'tier_code': data.get('p', '')
+        }
+    except Exception as e:
+        return None
+
+def encode_price_point_id(subscription_id, territory, tier_code):
+    """Encode price point ID from components"""
+    try:
+        data = {
+            's': subscription_id,
+            't': territory,
+            'p': tier_code
+        }
+        json_str = json.dumps(data, separators=(',', ':'))
+        encoded = base64.urlsafe_b64encode(json_str.encode()).decode().rstrip('=')
+        return encoded
+    except Exception as e:
+        return None
+
 def find_nearest_price_tier(api, subscription_id, target_price_usd, territory, price_details_all, exchange_rates):
     """
-    Find the nearest Apple price tier for a target USD price
+    Find the next tier ABOVE target price (not closest, but first tier above target)
     
     Strategy:
-    1. Get all available price points from subscription prices (they're included in the response)
-    2. Find USA price points to establish tier index/position
-    3. Find the tier in USA that matches our target USD price
-    4. Use the same tier index for the target territory
-    5. If exact match not found, find closest tier by converting to USD equivalent
+    1. Get ALL available price points from subscription prices (not just territory-specific ones)
+    2. Decode price point IDs to extract tier codes
+    3. Group by tier code and find average price per tier
+    4. Select the tier with smallest price that is >= target_price_usd
+    5. Find or construct price point ID for target territory with selected tier
     """
     try:
-        # Fetch subscription prices with included price points
-        endpoint = f"/subscriptions/{subscription_id}/prices"
-        params = {
-            "include": "subscriptionPricePoint",
-            "limit": 200
-        }
-        
-        data = api._make_request(endpoint, params=params)
-        included = data.get("included", [])
-        
-        # Extract price points (tiers)
-        price_points = {}
-        for item in included:
-            if item.get("type") == "subscriptionPricePoints":
-                tier_id = item.get("id")
-                attrs = item.get("attributes", {})
-                customer_price_str = attrs.get("customerPrice", "0")
-                try:
-                    price = float(customer_price_str)
-                    price_points[tier_id] = {
-                        "id": tier_id,
-                        "price": price,
-                        "tier_id": tier_id
-                    }
-                except:
-                    continue
-        
-        if not price_points:
-            return None
-        
-        # Get USA price to establish baseline
-        usa_price = None
-        usa_tier_id = None
-        for detail in price_details_all:
-            if detail.get("territory") in ["US", "USA"]:
-                usa_price = detail.get("price", 0)
-                usa_tier_id = detail.get("id")  # This is the price_point_id
-                break
-        
-        if not usa_price or not usa_tier_id:
-            return None
-        
-        # Find all price entries to map tiers to territories
-        # We need to get price entries and their relationships to price points
-        all_price_entries = []
+        # Fetch ALL price points from API (all pages)
+        all_price_points = {}
         cursor = None
+        
+        # Map territory codes: 2-letter to 3-letter for price point IDs
+        territory_3letter_map = {
+            "PA": "PAN", "US": "USA", "AT": "AUT", "DE": "DEU", "FR": "FRA",
+            "IT": "ITA", "ES": "ESP", "GB": "GBR", "CA": "CAN", "AU": "AUS",
+            "JP": "JPN", "CN": "CHN", "IN": "IND", "BR": "BRA", "MX": "MEX"
+        }
+        territory_3letter = territory_3letter_map.get(territory, territory.upper()[:3])
         
         while True:
             endpoint = f"/subscriptions/{subscription_id}/prices"
@@ -192,42 +185,29 @@ def find_nearest_price_tier(api, subscription_id, target_price_usd, territory, p
                 params["cursor"] = cursor
             
             data = api._make_request(endpoint, params=params)
-            prices = data.get("data", [])
             included = data.get("included", [])
             
-            # Build price point map
-            tier_map = {}
+            # Extract all price points and decode them
             for item in included:
                 if item.get("type") == "subscriptionPricePoints":
-                    tier_id = item.get("id")
+                    pp_id = item.get("id")
                     attrs = item.get("attributes", {})
                     customer_price_str = attrs.get("customerPrice", "0")
+                    
                     try:
                         price = float(customer_price_str)
-                        tier_map[tier_id] = price
+                        decoded = decode_price_point_id(pp_id)
+                        
+                        if decoded:
+                            all_price_points[pp_id] = {
+                                "id": pp_id,
+                                "price": price,
+                                "territory": decoded['territory'],
+                                "tier_code": decoded['tier_code'],
+                                "subscription_id": decoded['subscription_id']
+                            }
                     except:
                         pass
-            
-            # Map price entries to territories
-            for price_entry in prices:
-                attrs = price_entry.get("attributes", {})
-                start_date = attrs.get("startDate")
-                preserved = attrs.get("preserved", False)
-                
-                if start_date is None and not preserved:
-                    price_entry_id = price_entry.get("id")
-                    territory_code = decode_price_entry_id(price_entry_id)
-                    
-                    if territory_code:
-                        price_point_ref = price_entry.get("relationships", {}).get("subscriptionPricePoint", {}).get("data", {})
-                        tier_id = price_point_ref.get("id")
-                        
-                        if tier_id in tier_map:
-                            all_price_entries.append({
-                                "territory": territory_code,
-                                "tier_id": tier_id,
-                                "price": tier_map[tier_id]
-                            })
             
             # Check for next page
             links = data.get("links", {})
@@ -241,74 +221,142 @@ def find_nearest_price_tier(api, subscription_id, target_price_usd, territory, p
             else:
                 break
         
-        # Find USA tier price
-        usa_tier_price = None
-        for entry in all_price_entries:
-            if entry["territory"] in ["US", "USA"] and entry["tier_id"] == usa_tier_id:
-                usa_tier_price = entry["price"]
+        if not all_price_points:
+            return None
+        
+        # Group by tier code and calculate average price per tier
+        tier_codes = {}
+        for pp_id, pp_data in all_price_points.items():
+            tier_code = pp_data['tier_code']
+            price = pp_data['price']
+            
+            if tier_code not in tier_codes:
+                tier_codes[tier_code] = []
+            tier_codes[tier_code].append(price)
+        
+        # Find tiers ABOVE target price
+        candidates_above = []
+        candidates_below = []
+        
+        for tier_code, prices in tier_codes.items():
+            avg_price = sum(prices) / len(prices) if prices else 0
+            
+            if avg_price >= target_price_usd:
+                candidates_above.append({
+                    'tier_code': tier_code,
+                    'avg_price': avg_price,
+                    'diff': avg_price - target_price_usd
+                })
+            else:
+                candidates_below.append({
+                    'tier_code': tier_code,
+                    'avg_price': avg_price,
+                    'diff': target_price_usd - avg_price
+                })
+        
+        # Sort above-target by price (ascending - smallest above target first)
+        candidates_above.sort(key=lambda x: x['avg_price'])
+        # Sort below-target by difference (ascending - closest below target first)
+        candidates_below.sort(key=lambda x: x['diff'])
+        
+        # Select best tier: prefer tier above target, fallback to closest below
+        if candidates_above:
+            best_candidate = candidates_above[0]
+            best_tier_code = best_candidate['tier_code']
+        elif candidates_below:
+            best_candidate = candidates_below[0]
+            best_tier_code = best_candidate['tier_code']
+        else:
+            return None
+        
+        # Find price point ID for target territory with selected tier
+        # IMPORTANT: Only use tiers that already exist for this territory
+        # Apple doesn't allow creating new tier combinations - each territory has fixed available tiers
+        
+        best_price_point_id = None
+        
+        # Try to find existing price point for territory with this tier
+        for pp_id, pp_data in all_price_points.items():
+            pp_territory = pp_data['territory']
+            # Check both 3-letter code and 2-letter code
+            if (pp_territory == territory_3letter or pp_territory == territory) and pp_data['tier_code'] == best_tier_code:
+                best_price_point_id = pp_id
+                # Verify the price is reasonable (not too far from target)
+                actual_price = pp_data['price']
+                if abs(actual_price - target_price_usd) / target_price_usd > 0.5:  # More than 50% difference
+                    print(f"  ⚠️  Warning: Tier {best_tier_code} exists for {territory} but price is ${actual_price:.2f} (target: ${target_price_usd:.2f})")
                 break
         
-        if not usa_tier_price:
-            return None
-        
-        # Calculate which tier we need based on target_price_usd / usa_price ratio
-        price_ratio = target_price_usd / usa_price if usa_price > 0 else 1.0
-        target_tier_price_usd = usa_tier_price * price_ratio
-        
-        # Find all tiers used for target territory
-        territory_tiers = [e for e in all_price_entries if e["territory"] == territory]
-        
-        if not territory_tiers:
-            return None
-        
-        # Find closest tier for target territory
-        # All target prices are in USD, so we need to convert tier prices to USD for comparison
-        min_diff = float('inf')
-        best_tier_id = None
-        
-        # Get currency for territory to convert tier prices back to USD
-        currency_map = {
-            "AU": "AUD", "GB": "GBP", "CA": "CAD", "EU": "EUR", "DE": "EUR",
-            "FR": "EUR", "IT": "EUR", "ES": "EUR", "JP": "JPY", "CN": "CNY",
-            "CH": "CHF", "SE": "SEK", "NO": "NOK", "DK": "DKK", "NZ": "NZD",
-            "SG": "SGD", "HK": "HKD", "KR": "KRW", "IN": "INR", "BR": "BRL",
-            "MX": "MXN", "AR": "ARS", "ZA": "ZAR", "AE": "AED", "SA": "SAR"
-        }
-        currency = currency_map.get(territory, "USD")
-        
-        for entry in territory_tiers:
-            tier_price_local = entry["price"]  # Price in local currency
+        # If not found, discover ALL available price points for this territory
+        # by constructing price point IDs and checking if they exist (like website UI)
+        if not best_price_point_id:
+            # First, collect tiers already found
+            territory_tiers = []
+            for pp_id, pp_data in all_price_points.items():
+                pp_territory = pp_data['territory']
+                if pp_territory == territory_3letter or pp_territory == territory:
+                    territory_tiers.append({
+                        'tier_code': pp_data['tier_code'],
+                        'price': pp_data['price'],
+                        'pp_id': pp_id
+                    })
             
-            # Convert tier price from local currency to USD for comparison
-            if currency == "USD":
-                tier_price_usd = tier_price_local
-            elif exchange_rates and exchange_rates.rates:
-                # Convert local currency tier price to USD
-                tier_price_usd = exchange_rates.convert_local_to_usd(tier_price_local, currency)
-                if tier_price_usd is None:
-                    # Fallback: use relative pricing if conversion fails
-                    if usa_tier_price > 0 and usa_price > 0:
-                        # Estimate USD value based on ratio to USA tier
-                        tier_price_usd = tier_price_local * (usa_price / usa_tier_price)
-                    else:
-                        continue
-            else:
-                # No exchange rates available - use relative pricing
-                if usa_tier_price > 0 and usa_price > 0:
-                    # Estimate: if USA tier is X USD and local tier is Y local currency,
-                    # estimate USD as: Y * (USA_price / USA_tier_price)
-                    tier_price_usd = tier_price_local * (usa_price / usa_tier_price)
-                else:
+            # Then, test tier codes around target price to discover more options
+            tier_codes_to_test = set()
+            # Add candidate tier codes
+            for candidate in candidates_above + candidates_below:
+                tier_codes_to_test.add(candidate['tier_code'])
+            
+            # Test tier codes in focused range around target price
+            # Estimate tier range: if target is ~$50, test tiers 10300-10400
+            base_tier = int(target_price_usd / 0.005)  # Rough estimate
+            for tier_num in range(max(10000, base_tier - 100), min(11000, base_tier + 100), 10):
+                tier_codes_to_test.add(str(tier_num))
+            
+            # Test constructed price point IDs
+            for tier_code in tier_codes_to_test:
+                test_pp_id = encode_price_point_id(subscription_id, territory_3letter, tier_code)
+                if not test_pp_id:
                     continue
+                
+                # Check if this price point exists
+                try:
+                    pp_endpoint = f"/subscriptionPricePoints/{test_pp_id}"
+                    pp_data = api._make_request(pp_endpoint)
+                    if pp_data.get('data'):
+                        attrs = pp_data['data'].get('attributes', {})
+                        price = float(attrs.get('customerPrice', '0'))
+                        
+                        # Add if not already found
+                        if not any(t['tier_code'] == tier_code for t in territory_tiers):
+                            territory_tiers.append({
+                                'tier_code': tier_code,
+                                'price': price,
+                                'pp_id': test_pp_id
+                            })
+                except:
+                    # Price point doesn't exist for this tier/territory
+                    pass
             
-            # Compare target USD price with tier USD equivalent
-            diff = abs(tier_price_usd - target_price_usd)
-            
-            if diff < min_diff:
-                min_diff = diff
-                best_tier_id = entry["tier_id"]
+            if territory_tiers:
+                # Find tier closest to target (prefer above, fallback to closest below)
+                territory_tiers_above = [t for t in territory_tiers if t['price'] >= target_price_usd]
+                if territory_tiers_above:
+                    # Use smallest tier above target
+                    best_territory_tier = min(territory_tiers_above, key=lambda x: x['price'])
+                    best_price_point_id = best_territory_tier['pp_id']
+                    print(f"  ⚠️  Tier {best_tier_code} not available for {territory}, using tier {best_territory_tier['tier_code']} (${best_territory_tier['price']:.2f})")
+                else:
+                    # Use closest tier below target
+                    best_territory_tier = max(territory_tiers, key=lambda x: x['price'])
+                    best_price_point_id = best_territory_tier['pp_id']
+                    print(f"  ⚠️  No tier above target for {territory}, using tier {best_territory_tier['tier_code']} (${best_territory_tier['price']:.2f})")
+            else:
+                # No tiers found for this territory at all - cannot proceed
+                print(f"  ❌ No price points found for territory {territory}")
+                return None
         
-        return best_tier_id
+        return best_price_point_id
         
     except Exception as e:
         print(f"  Error finding price tier for {territory}: {e}")

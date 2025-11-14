@@ -70,26 +70,69 @@ def main():
     else:
         print("No scheduled price changes found.")
     
-    # Check specifically for PA
+    # Check specifically for PA with full details
     print(f"\n{'='*100}")
     print("Checking for Panama (PA) specifically...")
-    pa_found = False
+    pa_entries = []
+    
+    # Build price point map for reference
+    included = data.get("included", [])
+    price_point_map = {}
+    for item in included:
+        if item.get("type") == "subscriptionPricePoints":
+            price_point_id = item.get("id")
+            attrs = item.get("attributes", {})
+            customer_price = attrs.get("customerPrice", "0")
+            price_point_map[price_point_id] = customer_price
+    
     for price_entry in prices:
         attrs = price_entry.get("attributes", {})
         start_date = attrs.get("startDate")
+        preserved = attrs.get("preserved", False)
         price_entry_id = price_entry.get("id")
         territory = decode_price_entry_id(price_entry_id)
         
         if territory == "PA":
-            if start_date:
-                print(f"  ✓ Found scheduled price change for PA on {start_date}")
-                pa_found = True
-            else:
-                print(f"  ✓ Found current price for PA (no start date = current price)")
-                pa_found = True
+            price_point_ref = price_entry.get("relationships", {}).get("subscriptionPricePoint", {}).get("data", {})
+            price_point_id = price_point_ref.get("id")
+            price = price_point_map.get(price_point_id, "Unknown")
+            
+            pa_entries.append({
+                "price_entry_id": price_entry_id,
+                "price_point_id": price_point_id,
+                "price": price,
+                "start_date": start_date,
+                "preserved": preserved
+            })
     
-    if not pa_found:
+    if pa_entries:
+        print(f"\n  Found {len(pa_entries)} price entry/entries for Panama (PA):")
+        print("  " + "-" * 96)
+        for entry in pa_entries:
+            status = "SCHEDULED" if entry["start_date"] else "CURRENT"
+            preserved_str = " (PRESERVED)" if entry["preserved"] else ""
+            print(f"  • Status: {status}{preserved_str}")
+            print(f"    Price Entry ID: {entry['price_entry_id']}")
+            print(f"    Price Point ID: {entry['price_point_id'][:60]}...")
+            print(f"    Price: {entry['price']}")
+            if entry["start_date"]:
+                print(f"    Start Date: {entry['start_date']}")
+            print()
+    else:
         print("  ⚠ Panama (PA) not found in price list")
+    
+    # Check if 2025-11-15 was supposed to be scheduled
+    print(f"\n  Checking for scheduled changes on 2025-11-15...")
+    if "2025-11-15" in scheduled_changes:
+        territories_1115 = scheduled_changes["2025-11-15"]
+        if "PA" in territories_1115:
+            print(f"  ✓ Panama (PA) IS scheduled for 2025-11-15")
+        else:
+            print(f"  ✗ Panama (PA) is NOT scheduled for 2025-11-15")
+            print(f"    Territories scheduled for 2025-11-15: {', '.join(sorted(territories_1115))}")
+    else:
+        print(f"  ✗ No price changes scheduled for 2025-11-15")
+        print(f"    This suggests the price change was NOT created successfully")
     
     print(f"\n{'='*100}")
 
