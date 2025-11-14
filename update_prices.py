@@ -301,42 +301,59 @@ def find_nearest_price_tier(api, subscription_id, target_price_usd, territory, p
                         'pp_id': pp_id
                     })
             
-            # Then, test tier codes around target price to discover more options
+            # Then, test tier codes around target price to discover more options (parallel)
             tier_codes_to_test = set()
             # Add candidate tier codes
             for candidate in candidates_above + candidates_below:
                 tier_codes_to_test.add(candidate['tier_code'])
             
             # Test tier codes in focused range around target price
-            # Estimate tier range: if target is ~$50, test tiers 10300-10400
-            base_tier = int(target_price_usd / 0.005)  # Rough estimate
-            for tier_num in range(max(10000, base_tier - 100), min(11000, base_tier + 100), 10):
+            # Estimate tier range based on target price (roughly $0.005 per tier unit)
+            base_tier = int(target_price_usd / 0.005) if target_price_usd > 0 else 10300
+            # Test ±50 tiers around target (reduced from ±100 for performance)
+            for tier_num in range(max(10000, base_tier - 50), min(11000, base_tier + 50), 10):
                 tier_codes_to_test.add(str(tier_num))
             
-            # Test constructed price point IDs
-            for tier_code in tier_codes_to_test:
+            # Prepare parallel requests for tier code testing
+            request_functions = []
+            tier_code_list = sorted(tier_codes_to_test)
+            
+            for tier_code in tier_code_list:
                 test_pp_id = encode_price_point_id(subscription_id, territory_3letter, tier_code)
-                if not test_pp_id:
-                    continue
-                
-                # Check if this price point exists
-                try:
+                if test_pp_id:
                     pp_endpoint = f"/subscriptionPricePoints/{test_pp_id}"
-                    pp_data = api._make_request(pp_endpoint)
-                    if pp_data.get('data'):
-                        attrs = pp_data['data'].get('attributes', {})
+                    request_functions.append((lambda ep: lambda: api._make_request(ep))(pp_endpoint))
+                else:
+                    request_functions.append(None)
+            
+            # Filter out None requests and track indices
+            valid_requests = []
+            valid_indices = []
+            for idx, req in enumerate(request_functions):
+                if req is not None:
+                    valid_requests.append(req)
+                    valid_indices.append(idx)
+            
+            # Make parallel requests (15 concurrent for faster discovery)
+            if valid_requests:
+                results = api._make_parallel_requests(valid_requests, max_workers=15)
+                
+                # Process results
+                for result_idx, result in enumerate(results):
+                    if result and result.get('data'):
+                        original_idx = valid_indices[result_idx]
+                        tier_code = tier_code_list[original_idx]
+                        attrs = result['data'].get('attributes', {})
                         price = float(attrs.get('customerPrice', '0'))
                         
                         # Add if not already found
                         if not any(t['tier_code'] == tier_code for t in territory_tiers):
+                            test_pp_id = encode_price_point_id(subscription_id, territory_3letter, tier_code)
                             territory_tiers.append({
                                 'tier_code': tier_code,
                                 'price': price,
                                 'pp_id': test_pp_id
                             })
-                except:
-                    # Price point doesn't exist for this tier/territory
-                    pass
             
             if territory_tiers:
                 # Find tier closest to target (prefer above, fallback to closest below)

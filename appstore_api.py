@@ -1,7 +1,9 @@
 import requests
 import auth
 import config
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 class AppStoreConnectAPI:
     def __init__(self):
@@ -148,4 +150,96 @@ class AppStoreConnectAPI:
         if response.text:
             return response.json()
         return {"status": "deleted"}
+    
+    def _make_parallel_requests(self, requests_list: List[Callable[[], Any]], max_workers: int = 10, retry_on_rate_limit: bool = True) -> List[Any]:
+        """
+        Make multiple API requests in parallel
+        
+        Args:
+            requests_list: List of callable functions that return API responses
+            max_workers: Maximum number of concurrent requests (default: 10)
+            retry_on_rate_limit: Whether to retry on 429 rate limit errors (default: True)
+        
+        Returns:
+            List of results in the same order as requests_list (None for failed requests)
+        """
+        results = [None] * len(requests_list)
+        rate_limited_indices = []
+        
+        def make_request_with_index(index: int, request_func: Callable[[], Any]) -> tuple[int, Any]:
+            """Wrapper to track index of request"""
+            try:
+                return (index, request_func())
+            except requests.exceptions.HTTPError as e:
+                # Check if it's a rate limit error (429)
+                if retry_on_rate_limit and hasattr(e.response, 'status_code') and e.response.status_code == 429:
+                    return (index, "RATE_LIMITED")
+                # For other errors, return None (will be handled)
+                return (index, None)
+            except Exception:
+                return (index, None)
+        
+        # First pass: Make parallel requests
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_index = {
+                executor.submit(make_request_with_index, idx, req): idx 
+                for idx, req in enumerate(requests_list)
+            }
+            
+            completed = 0
+            for future in as_completed(future_to_index):
+                completed += 1
+                if completed % 10 == 0:
+                    print(f"    → Completed {completed}/{len(requests_list)} requests...")
+                
+                try:
+                    index, result = future.result()
+                    if result == "RATE_LIMITED":
+                        rate_limited_indices.append(index)
+                    elif result is not None:
+                        results[index] = result
+                except Exception:
+                    pass
+        
+        # Second pass: Retry rate-limited requests with exponential backoff
+        if rate_limited_indices and retry_on_rate_limit:
+            print(f"    ⚠️  {len(rate_limited_indices)} requests rate-limited, retrying with backoff...")
+            wait_time = 1  # Start with 1 second
+            
+            for attempt in range(3):  # Max 3 retry attempts
+                time.sleep(wait_time)
+                retry_requests = [requests_list[idx] for idx in rate_limited_indices]
+                
+                with ThreadPoolExecutor(max_workers=5) as executor:  # Lower concurrency for retries
+                    retry_futures = {
+                        executor.submit(make_request_with_index, rate_limited_indices[idx], req): idx
+                        for idx, req in enumerate(retry_requests)
+                    }
+                    
+                    still_rate_limited = []
+                    successful_indices = []
+                    for future in as_completed(retry_futures):
+                        try:
+                            index, result = future.result()
+                            if result == "RATE_LIMITED":
+                                still_rate_limited.append(index)
+                            elif result is not None:
+                                results[index] = result
+                                successful_indices.append(index)
+                        except Exception:
+                            pass
+                    
+                    # Remove successful indices from rate_limited_indices
+                    rate_limited_indices = [idx for idx in rate_limited_indices if idx not in successful_indices]
+                
+                if not still_rate_limited:
+                    break
+                
+                rate_limited_indices = still_rate_limited
+                wait_time *= 2  # Exponential backoff: 1s, 2s, 4s
+            
+            if rate_limited_indices:
+                print(f"    ⚠️  {len(rate_limited_indices)} requests still rate-limited after retries")
+        
+        return results
 
