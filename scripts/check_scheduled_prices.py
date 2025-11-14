@@ -2,6 +2,11 @@
 """
 Check scheduled price changes for a subscription
 """
+import sys
+import os
+# Add parent directory to path to import modules
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from appstore_api import AppStoreConnectAPI
 from update_prices import get_price_details, decode_price_entry_id
 import json

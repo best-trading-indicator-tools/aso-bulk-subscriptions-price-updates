@@ -1,18 +1,32 @@
 import bigmac_index
+import netflix_index
 import config
 from typing import Dict, List, Optional
 
 class PriceCalculator:
-    def __init__(self):
-        self.bigmac = bigmac_index.BigMacIndex()
-        self.bigmac.fetch_data()
+    def __init__(self, index_type: str = "bigmac"):
+        """
+        Initialize price calculator with chosen index type
+        
+        Args:
+            index_type: "bigmac" or "netflix"
+        """
+        self.index_type = index_type.lower()
+        
+        if self.index_type == "netflix":
+            self.index = netflix_index.NetflixIndex()
+            self.index.fetch_data()
+        else:  # Default to Big Mac Index
+            self.index_type = "bigmac"
+            self.index = bigmac_index.BigMacIndex()
+            self.index.fetch_data()
     
     def calculate_new_price(self, base_price: float, territory_code: str) -> Optional[float]:
         """
-        Calculate new price based on Big Mac Index ratio
-        new_price = base_price * (bigmac_price_territory / bigmac_price_usd)
+        Calculate new price based on selected index ratio
+        new_price = base_price * (index_price_territory / index_price_usd)
         """
-        ratio = self.bigmac.get_country_ratio(territory_code)
+        ratio = self.index.get_country_ratio(territory_code)
         if ratio is None:
             return None
         
@@ -55,7 +69,7 @@ class PriceCalculator:
         Returns list of dictionaries with territory, current price, proposed price, ratio
         """
         report = []
-        all_ratios = self.bigmac.get_all_ratios()
+        all_ratios = self.index.get_all_ratios()
         
         for territory, price_info in current_prices.items():
             current_price_data = price_info.get('attributes', {}).get('subscriptionPricePoint', {})
@@ -63,7 +77,7 @@ class PriceCalculator:
             
             ratio = all_ratios.get(territory)
             if ratio is None:
-                ratio = self.bigmac.get_country_ratio(territory)
+                ratio = self.index.get_country_ratio(territory)
             
             proposed_price = None
             if ratio:

@@ -339,9 +339,10 @@ def update_subscription_prices(api, calculator, exchange_rates, subscription_id,
     print(f"  USA base price: ${usa_price:.2f} USD")
     print(f"  Found {len(price_details)} price points")
     
-    # Get Big Mac Index ratios
-    print("  Fetching Big Mac Index ratios...")
-    all_ratios = calculator.bigmac.get_all_ratios()
+    # Get index ratios
+    index_name = "Big Mac Index" if calculator.index_type == "bigmac" else "Netflix Index"
+    print(f"  Fetching {index_name} ratios...")
+    all_ratios = calculator.index.get_all_ratios()
     
     # Get current exchange rates
     print("  Fetching current exchange rates...")
@@ -367,19 +368,46 @@ def update_subscription_prices(api, calculator, exchange_rates, subscription_id,
             })
             continue
         
-        # Get Big Mac Index ratio
+        # Get index ratio
         ratio = all_ratios.get(territory)
         if ratio is None:
             # Try alternative territory code formats
-            ratio = calculator.bigmac.get_country_ratio(territory)
+            ratio = calculator.index.get_country_ratio(territory)
         
         if ratio is None:
-            skipped.append({
-                "territory": territory,
-                "current_price": current_price,
-                "action": "No Big Mac Index data available"
-            })
-            continue
+            index_name = "Big Mac Index" if calculator.index_type == "bigmac" else "Netflix Index"
+            
+            # For Netflix Index, try falling back to Big Mac Index
+            if calculator.index_type == "netflix":
+                try:
+                    import bigmac_index
+                    bigmac = bigmac_index.BigMacIndex()
+                    bigmac.fetch_data()
+                    bigmac_ratio = bigmac.get_country_ratio(territory)
+                    if bigmac_ratio is not None:
+                        ratio = bigmac_ratio
+                        print(f"    ⚠️  {territory}: Using Big Mac Index as fallback (Netflix data unavailable)")
+                    else:
+                        skipped.append({
+                            "territory": territory,
+                            "current_price": current_price,
+                            "action": f"No {index_name} or Big Mac Index data available"
+                        })
+                        continue
+                except:
+                    skipped.append({
+                        "territory": territory,
+                        "current_price": current_price,
+                        "action": f"No {index_name} data available (fallback failed)"
+                    })
+                    continue
+            else:
+                skipped.append({
+                    "territory": territory,
+                    "current_price": current_price,
+                    "action": f"No {index_name} data available"
+                })
+                continue
         
         # Calculate new price in USD
         new_price_usd = usa_price * ratio
@@ -448,20 +476,64 @@ def update_subscription_prices(api, calculator, exchange_rates, subscription_id,
 
 def main():
     print("="*100)
-    print("ASO Pricing Update - Big Mac Index Based")
+    print("ASO Pricing Update - PPP Index Based")
     print("="*100)
     print(f"\nSelected {len(SELECTED_SUBSCRIPTIONS)} subscription product(s) to update")
     if not SELECTED_SUBSCRIPTIONS:
         print("⚠️  No subscriptions configured. Set SUBSCRIPTIONS_TO_UPDATE in .env file.")
         return
-    print("Strategy: Keep USA base price, apply Big Mac Index multipliers to all other countries")
-    print("Using current exchange rates (November 14, 2025)")
-    print("Price changes will take effect immediately\n")
     
-    start_date = None  # Immediate
+    # Choose index type
+    print("\n" + "="*100)
+    print("Select Pricing Index:")
+    print("="*100)
+    print("1. Big Mac Index (default) - Purchasing power parity based on Big Mac prices")
+    print("2. Netflix Index - Purchasing power parity based on Netflix subscription prices")
+    print()
+    
+    index_choice = input("Choose index (1 or 2, default: 1): ").strip()
+    if index_choice == "2":
+        index_type = "netflix"
+        index_name = "Netflix Index"
+    else:
+        index_type = "bigmac"
+        index_name = "Big Mac Index"
+    
+    print(f"\n✓ Using {index_name}")
+    
+    # Get start date
+    print("\n" + "="*100)
+    print("Price Change Start Date:")
+    print("="*100)
+    print("Note: Apple requires a future date for price changes (minimum 1 day ahead)")
+    print("Format: YYYY-MM-DD (e.g., 2025-11-15)")
+    print()
+    
+    start_date_input = input("Enter start date (YYYY-MM-DD) or press Enter for tomorrow: ").strip()
+    
+    if start_date_input:
+        # Validate date format
+        try:
+            datetime.strptime(start_date_input, "%Y-%m-%d")
+            start_date = start_date_input
+        except ValueError:
+            print("⚠️  Invalid date format. Using tomorrow as default.")
+            start_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    else:
+        start_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    print(f"✓ Price changes will take effect on: {start_date}")
+    
+    print("\n" + "="*100)
+    print("Configuration Summary:")
+    print("="*100)
+    print(f"Index Type: {index_name}")
+    print(f"Start Date: {start_date}")
+    print(f"Strategy: Keep USA base price, apply {index_name} multipliers to all other countries")
+    print("="*100 + "\n")
     
     api = AppStoreConnectAPI()
-    calculator = PriceCalculator()
+    calculator = PriceCalculator(index_type=index_type)
     exchange_rates = ExchangeRates()
     
     # Process each subscription one at a time

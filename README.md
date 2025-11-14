@@ -1,19 +1,21 @@
-# ASO Pricing - Big Mac Index Based Subscription Pricing
+# ASO Pricing - PPP Index Based Subscription Pricing
 
-Automate subscription price updates for App Store Connect using the Big Mac Index to calculate purchasing power parity (PPP) adjusted prices across all territories.
+Automate subscription price updates for App Store Connect using purchasing power parity (PPP) indicators (Big Mac Index or Netflix Index) to calculate adjusted prices across all territories.
 
 ## Overview
 
-This tool calculates optimal subscription prices for different countries/territories based on the Big Mac Index, which measures purchasing power parity. It keeps your US base price unchanged and applies PPP-adjusted multipliers to all other territories, ensuring your pricing is fair and competitive globally.
+This tool calculates optimal subscription prices for different countries/territories based on purchasing power parity (PPP) indicators. You can choose between the **Big Mac Index** or **Netflix Index** to determine fair pricing. It keeps your US base price unchanged and applies PPP-adjusted multipliers to all other territories, ensuring your pricing is fair and competitive globally.
 
 ## Features
 
 - 🍔 **Big Mac Index Integration**: Automatically fetches the latest Big Mac Index data from The Economist
+- 📺 **Netflix Index Option**: Alternative PPP indicator based on Netflix subscription pricing
+- 🔀 **Index Selection**: Choose between Big Mac Index or Netflix Index for pricing calculations
 - 💰 **PPP-Based Pricing**: Calculates prices based on purchasing power parity
-- 🌍 **Multi-Territory Support**: Handles all App Store territories with fallback ratios for countries without Big Mac data
+- 🌍 **Multi-Territory Support**: Handles all App Store territories with fallback ratios for countries without data
 - 📊 **Price Preview**: See calculated prices before applying changes
 - 🔄 **Bulk Updates**: Update multiple subscriptions at once
-- 📅 **Scheduled Changes**: Schedule price changes for future dates
+- 📅 **Scheduled Changes**: Schedule price changes for future dates with custom start dates
 - 🔐 **App Store Connect API**: Full integration with Apple's API
 
 ## Prerequisites
@@ -63,7 +65,8 @@ aso-pricing/
 ├── auth.py                  # JWT token generation for API auth
 ├── appstore_api.py          # App Store Connect API client
 ├── bigmac_index.py          # Big Mac Index data fetcher and calculator
-├── price_calculator.py      # Price calculation logic
+├── netflix_index.py         # Netflix Index data fetcher and calculator
+├── price_calculator.py      # Price calculation logic (supports both indices)
 ├── exchange_rates.py         # Exchange rate fetcher
 ├── main.py                  # Main script (scan & preview)
 ├── list_subscriptions.py    # List all subscriptions
@@ -137,11 +140,17 @@ Update prices for multiple subscriptions:
 python3 update_prices.py
 ```
 
+**Interactive prompts:**
+1. **Choose Pricing Index**: Select between Big Mac Index (default) or Netflix Index
+2. **Set Start Date**: Enter a future date (YYYY-MM-DD) or press Enter for tomorrow
+   - Apple requires price changes to be scheduled at least 1 day in advance
+   - Format: `2025-11-15`
+
 **Important**: This script will:
 - Process all subscriptions listed in `SUBSCRIPTIONS_TO_UPDATE` from `.env`
 - Show a preview before each update
 - Ask for confirmation before applying changes
-- Schedule price changes for tomorrow (or specified date)
+- Schedule price changes for your specified date
 
 **Configuration**: Set `SUBSCRIPTIONS_TO_UPDATE` in your `.env` file to select which subscriptions to update. Format: `"ID1:Name1,ID2:Name2,ID3:Name3"`
 
@@ -170,26 +179,51 @@ python3 scripts/test_one_country.py
 
 ## How It Works
 
-### Big Mac Index
+### Pricing Indices
 
-The Big Mac Index is an economic indicator that compares purchasing power between countries by comparing the price of a Big Mac burger. This tool uses it to calculate fair subscription prices.
+You can choose between two purchasing power parity (PPP) indicators:
+
+#### Big Mac Index (Default)
+The Big Mac Index is an economic indicator that compares purchasing power between countries by comparing the price of a Big Mac burger. This tool automatically fetches the latest data from The Economist's GitHub repository.
 
 **Formula**: `New Price = US Base Price × (Big Mac Price in Country / Big Mac Price in US)`
 
+#### Netflix Index
+The Netflix Index uses Netflix Standard plan subscription prices as a PPP indicator. This can be useful for subscription-based products as it reflects how subscription services are priced globally.
+
+**Formula**: `New Price = US Base Price × (Netflix Price in Country / Netflix Price in US)`
+
+**Important Notes**:
+- **No Public API**: Netflix does NOT provide a public API for pricing data
+- **Built-in Data**: Uses curated built-in dataset (may not be comprehensive or up-to-date)
+- **Data Accuracy**: Netflix pricing varies significantly ($2.82 in Pakistan to $22.89 in Switzerland) and changes frequently
+- **Missing Countries**: For countries without Netflix data, the tool automatically falls back to Big Mac Index
+- **Custom Data Source**: You can configure `NETFLIX_INDEX_URL` in `.env` to use your own CSV data source
+- **Data Sources**: Built-in data is based on publicly available information from sources like Visual Capitalist and Statista
+
+**Fallback Strategy**:
+1. Try Netflix Index data
+2. Try similar country proxy
+3. Try regional average
+4. **Fallback to Big Mac Index** (if Netflix data unavailable)
+5. Return None (skip territory)
+
 ### Price Calculation Process
 
-1. **Fetch Big Mac Index Data**: Downloads latest data from The Economist's GitHub repository
-2. **Calculate Ratios**: Computes PPP ratios for each territory relative to US
-3. **Apply Fallbacks**: Uses estimated ratios for countries without Big Mac data
-4. **Find Price Tiers**: Matches calculated prices to Apple's available price tiers
-5. **Schedule Changes**: Creates price change schedules via App Store Connect API
+1. **Select Index**: Choose between Big Mac Index or Netflix Index
+2. **Fetch Index Data**: Downloads latest data (Big Mac from The Economist, Netflix from built-in dataset)
+3. **Calculate Ratios**: Computes PPP ratios for each territory relative to US
+4. **Apply Fallbacks**: Uses estimated ratios for countries without index data
+5. **Find Price Tiers**: Matches calculated prices to Apple's available price tiers
+6. **Schedule Changes**: Creates price change schedules via App Store Connect API with your specified start date
 
 ### Fallback Ratios
 
-For countries without Big Mac Index data, the tool uses:
+For countries without index data, the tool uses:
 - Similar country proxies (e.g., Panama → Costa Rica)
 - GDP per capita (PPP) estimates
 - Regional averages (e.g., Euro area for EUR countries)
+- Built-in estimates based on economic indicators
 
 ## API Reference
 
@@ -203,13 +237,20 @@ App Store Connect API client with methods for:
 
 #### `bigmac_index.py`
 Big Mac Index data fetcher and ratio calculator:
-- `fetch_data()`: Downloads latest Big Mac Index data
+- `fetch_data()`: Downloads latest Big Mac Index data from The Economist
+- `get_country_ratio(territory_code)`: Gets PPP ratio for a territory
+- `get_all_ratios()`: Gets ratios for all available territories
+
+#### `netflix_index.py`
+Netflix Index data fetcher and ratio calculator:
+- `fetch_data()`: Loads Netflix pricing data (built-in or from URL if configured)
 - `get_country_ratio(territory_code)`: Gets PPP ratio for a territory
 - `get_all_ratios()`: Gets ratios for all available territories
 
 #### `price_calculator.py`
 Price calculation engine:
-- `calculate_new_price(base_price, territory_code)`: Calculates new price
+- `__init__(index_type="bigmac")`: Initialize with "bigmac" or "netflix" index
+- `calculate_new_price(base_price, territory_code)`: Calculates new price using selected index
 - `find_nearest_price_tier()`: Finds matching Apple price tier
 
 ## Configuration
@@ -251,6 +292,8 @@ SUBSCRIPTIONS_TO_UPDATE="6743152682:Annual Subscription,6743152701:Monthly Subsc
 ### Price Change Scheduling
 
 - **Future Dates Required**: After a subscription is approved, you cannot create immediate price changes. All changes must be scheduled for a future date (minimum 1 day ahead).
+- **Start Date Selection**: The `update_prices.py` script prompts you to enter a start date (YYYY-MM-DD format). Press Enter to use tomorrow's date as default.
+- **Date Validation**: The script validates date format and ensures it's in the future. Invalid dates default to tomorrow.
 - **Propagation Delay**: API changes may take up to 1 hour to appear in App Store Connect dashboard (manual changes appear immediately).
 - **User Notification**: Apple automatically notifies users of price increases and may require consent in some regions.
 

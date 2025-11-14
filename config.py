@@ -16,6 +16,7 @@ BIGMAC_INDEX_URL = os.getenv(
     "BIGMAC_INDEX_URL",
     "https://raw.githubusercontent.com/TheEconomist/big-mac-data/master/output-data/big-mac-full-index.csv"
 )
+NETFLIX_INDEX_URL = os.getenv("NETFLIX_INDEX_URL", None)  # Optional: URL to Netflix pricing CSV
 BASE_CURRENCY = os.getenv("BASE_CURRENCY", "USD")
 
 # Subscription IDs to update (comma-separated list of ID:Name pairs)
