@@ -57,7 +57,9 @@ pip install -r requirements.txt
 aso-pricing/
 ├── README.md                 # This file
 ├── requirements.txt          # Python dependencies
-├── config.py                # Configuration (API keys, app ID, etc.)
+├── .env.example              # Environment variables template
+├── .env                      # Your credentials (gitignored, create from .env.example)
+├── config.py                # Configuration (reads from .env)
 ├── auth.py                  # JWT token generation for API auth
 ├── appstore_api.py          # App Store Connect API client
 ├── bigmac_index.py          # Big Mac Index data fetcher and calculator
@@ -66,6 +68,7 @@ aso-pricing/
 ├── main.py                  # Main script (scan & preview)
 ├── list_subscriptions.py    # List all subscriptions
 ├── update_prices.py         # Bulk price update script
+├── subscriptions.json        # Optional: Generated reference file (gitignored)
 └── scripts/                 # Test and utility scripts
     ├── README.md
     ├── test_one_country.py  # Test price calculation for one country
@@ -89,12 +92,29 @@ View all subscription products for your app:
 python3 list_subscriptions.py
 ```
 
+Or use the dedicated script in the scripts folder:
+
+```bash
+python3 scripts/generate_subscriptions_json.py
+```
+
 This will:
 - List all subscription groups and products
 - Show current prices
-- **Save details to `subscriptions.json`** - This file contains all subscription metadata including IDs, names, product IDs, states, and price information. It's useful for reference but is gitignored (not committed to the repository).
+- **Optionally save details to `subscriptions.json`** - This file contains all subscription metadata including IDs, names, product IDs, states, and price information.
 
-**Note**: The `subscriptions.json` file is automatically generated when you run `list_subscriptions.py`. It's excluded from git via `.gitignore` since it contains app-specific data that may change frequently.
+**Important**: The `subscriptions.json` file is **NOT required** for the tool to function. All scripts fetch data directly from the App Store Connect API. This file is:
+- **Optional** - Only created if you run `list_subscriptions.py` or `generate_subscriptions_json.py`
+- **For reference only** - Useful for viewing subscription IDs and metadata offline
+- **Gitignored** - Excluded from git via `.gitignore` since it contains app-specific data
+- **Not used by other scripts** - All price update scripts fetch data directly from the API
+
+To generate it, run:
+```bash
+python3 scripts/generate_subscriptions_json.py
+```
+
+**Note**: You don't need to generate `subscriptions.json` before using other scripts. All scripts work directly with the API. This file is purely for reference/backup purposes.
 
 ### 2. Preview Price Changes
 
@@ -118,12 +138,17 @@ python3 update_prices.py
 ```
 
 **Important**: This script will:
-- Process all subscriptions listed in `SELECTED_SUBSCRIPTIONS`
+- Process all subscriptions listed in `SUBSCRIPTIONS_TO_UPDATE` from `.env`
 - Show a preview before each update
 - Ask for confirmation before applying changes
 - Schedule price changes for tomorrow (or specified date)
 
-**Configuration**: Edit `SELECTED_SUBSCRIPTIONS` in `update_prices.py` to select which subscriptions to update.
+**Configuration**: Set `SUBSCRIPTIONS_TO_UPDATE` in your `.env` file to select which subscriptions to update. Format: `"ID1:Name1,ID2:Name2,ID3:Name3"`
+
+Example:
+```bash
+SUBSCRIPTIONS_TO_UPDATE="6743152682:Annual Subscription,6743152701:Monthly Subscription"
+```
 
 ### 4. Update Single Territory (Example)
 
@@ -201,20 +226,24 @@ PRIVATE_KEY_PATH=AuthKey_XXXXX.p8     # Path to your .p8 key file
 API_BASE_URL=https://api.appstoreconnect.apple.com/v1
 BIGMAC_INDEX_URL=https://raw.githubusercontent.com/TheEconomist/big-mac-data/master/output-data/big-mac-full-index.csv
 BASE_CURRENCY=USD
+
+# Subscription IDs to update (comma-separated ID:Name pairs)
+SUBSCRIPTIONS_TO_UPDATE="ID1:Name1,ID2:Name2,ID3:Name3"
 ```
 
 **Note**: The `.env` file is gitignored and will not be committed to the repository. Use `.env.example` as a template.
 
 ### Subscription Selection
 
-Edit `SELECTED_SUBSCRIPTIONS` in `update_prices.py`:
+Set `SUBSCRIPTIONS_TO_UPDATE` in your `.env` file. The format is a comma-separated list of `ID:Name` pairs:
 
-```python
-SELECTED_SUBSCRIPTIONS = {
-    "subscription-id-1": "Subscription Name 1",
-    "subscription-id-2": "Subscription Name 2",
-    # ...
-}
+```bash
+SUBSCRIPTIONS_TO_UPDATE="ID1:Name1,ID2:Name2,ID3:Name3"
+```
+
+Example:
+```bash
+SUBSCRIPTIONS_TO_UPDATE="6743152682:Annual Subscription,6743152701:Monthly Subscription,6745085678:Weekly Subscription"
 ```
 
 ## Important Notes

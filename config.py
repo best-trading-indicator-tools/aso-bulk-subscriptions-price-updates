@@ -18,3 +18,16 @@ BIGMAC_INDEX_URL = os.getenv(
 )
 BASE_CURRENCY = os.getenv("BASE_CURRENCY", "USD")
 
+# Subscription IDs to update (comma-separated list of ID:Name pairs)
+# Format: "ID1:Name1,ID2:Name2,ID3:Name3"
+# Example: "6743152682:Annual Subscription,6743152701:Monthly Subscription"
+SUBSCRIPTIONS_TO_UPDATE = {}
+
+_subscriptions_str = os.getenv("SUBSCRIPTIONS_TO_UPDATE", "")
+if _subscriptions_str:
+    for pair in _subscriptions_str.split(","):
+        pair = pair.strip()
+        if ":" in pair:
+            sub_id, sub_name = pair.split(":", 1)
+            SUBSCRIPTIONS_TO_UPDATE[sub_id.strip()] = sub_name.strip()
+

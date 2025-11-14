@@ -5,6 +5,7 @@ Keeps USA base price, applies multipliers to all other countries
 """
 import json
 import base64
+import sys
 from datetime import datetime, timedelta
 from appstore_api import AppStoreConnectAPI
 from price_calculator import PriceCalculator
@@ -12,18 +13,15 @@ from exchange_rates import ExchangeRates
 import config
 
 # Selected subscription IDs to update
-SELECTED_SUBSCRIPTIONS = {
-    "6743362609": "Annual 80% OFF Subscription",
-    "6754931910": "Annual Expensive 2",
-    "6743152682": "Annual Subscription",
-    "6747279472": "Annual Subscription + Trial",
-    "6754627997": "Annual Subscription Cheap",
-    "6754931704": "Annual Subscription Expensive 1",
-    "6745085678": "Weekly Subscription",
-    "6754627884": "Weekly Subscription Cheap",
-    "6743152701": "Monthly Subscription",
-    "6754627901": "Monthly Subscription Cheap"
-}
+# Load from config (which reads from .env)
+# Format in .env: SUBSCRIPTIONS_TO_UPDATE="ID1:Name1,ID2:Name2,ID3:Name3"
+SELECTED_SUBSCRIPTIONS = config.SUBSCRIPTIONS_TO_UPDATE
+
+if not SELECTED_SUBSCRIPTIONS:
+    print("⚠️  Warning: No subscriptions configured in .env file")
+    print("   Set SUBSCRIPTIONS_TO_UPDATE in .env with format: ID1:Name1,ID2:Name2")
+    print("   Example: SUBSCRIPTIONS_TO_UPDATE=\"6743152682:Annual Subscription,6743152701:Monthly Subscription\"")
+    sys.exit(1)
 
 def decode_price_entry_id(price_entry_id):
     """Decode price entry ID to extract territory"""
@@ -452,7 +450,10 @@ def main():
     print("="*100)
     print("ASO Pricing Update - Big Mac Index Based")
     print("="*100)
-    print(f"\nSelected {len(SELECTED_SUBSCRIPTIONS)} subscription products to update")
+    print(f"\nSelected {len(SELECTED_SUBSCRIPTIONS)} subscription product(s) to update")
+    if not SELECTED_SUBSCRIPTIONS:
+        print("⚠️  No subscriptions configured. Set SUBSCRIPTIONS_TO_UPDATE in .env file.")
+        return
     print("Strategy: Keep USA base price, apply Big Mac Index multipliers to all other countries")
     print("Using current exchange rates (November 14, 2025)")
     print("Price changes will take effect immediately\n")

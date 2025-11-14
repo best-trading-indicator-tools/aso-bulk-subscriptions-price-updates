@@ -12,6 +12,7 @@ This directory contains test and utility scripts for the ASO pricing tool.
 
 ## Utility Scripts
 
+- `generate_subscriptions_json.py` - Generate subscriptions.json file from App Store Connect API (reads from .env)
 - `check_scheduled_prices.py` - Check scheduled price changes for a subscription
 - `check_currency.py` - Check what currency the prices are returned in
 - `check_territories.py` - List all available territories for a subscription
@@ -22,6 +23,11 @@ This directory contains test and utility scripts for the ASO pricing tool.
 These scripts are for testing and debugging purposes. The main scripts (`update_prices.py`, `list_subscriptions.py`, `main.py`) are in the root directory.
 
 ### Examples
+
+**Generate subscriptions.json:**
+```bash
+python3 scripts/generate_subscriptions_json.py
+```
 
 **Test price calculation for one country:**
 ```bash
