@@ -6,11 +6,13 @@ Keeps USA base price, applies multipliers to all other countries
 import json
 import base64
 import sys
+import time
 from datetime import datetime, timedelta
 from appstore_api import AppStoreConnectAPI
 from price_calculator import PriceCalculator
 from exchange_rates import ExchangeRates
 import config
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Selected subscription IDs to update
 # Load from config (which reads from .env)
@@ -23,6 +25,19 @@ if not SELECTED_SUBSCRIPTIONS:
     print("   Example: SUBSCRIPTIONS_TO_UPDATE=\"6743152682:Annual Subscription,6743152701:Monthly Subscription\"")
     sys.exit(1)
 
+def format_duration(seconds):
+    """Format duration in seconds to hours/minutes/seconds"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    
+    if hours > 0:
+        return f"{hours}h {minutes}m {secs}s"
+    elif minutes > 0:
+        return f"{minutes}m {secs}s"
+    else:
+        return f"{secs}s"
+
 def decode_price_entry_id(price_entry_id):
     """Decode price entry ID to extract territory"""
     try:
@@ -34,7 +49,7 @@ def decode_price_entry_id(price_entry_id):
     except:
         return None
 
-def get_price_details(api, subscription_id):
+def get_price_details(api, subscription_id, exchange_rates=None):
     """Get detailed price information including territories"""
     # Get prices with included data - fetch all pages
     all_prices = []
@@ -87,30 +102,86 @@ def get_price_details(api, subscription_id):
                 "price": price
             }
     
-    # Map prices to territories - get active prices only (startDate is null and preserved is false)
-    price_details = []
-    seen_territories = set()
+    # Currency mapping for conversion
+    currency_map = {
+        "MX": "MXN", "BR": "BRL", "CA": "CAD", "PA": "USD",
+        "US": "USD", "USA": "USD"
+    }
+    
+    # Map prices to territories - collect all prices (active, scheduled, preserved)
+    territory_candidates = {}  # territory -> list of candidate prices
     
     for price_entry in all_prices:
         attrs = price_entry.get("attributes", {})
         start_date = attrs.get("startDate")
         preserved = attrs.get("preserved", False)
+        price_entry_id = price_entry.get("id")
+        territory = decode_price_entry_id(price_entry_id)
         
-        # Get active price (no startDate means it's the current price)
-        if start_date is None and not preserved:
-            price_entry_id = price_entry.get("id")
-            territory = decode_price_entry_id(price_entry_id)
-            
-            if territory and territory not in seen_territories:
-                price_point_ref = price_entry.get("relationships", {}).get("subscriptionPricePoint", {}).get("data", {})
-                price_point_id = price_point_ref.get("id")
-                
-                if price_point_id in price_point_map:
-                    detail = price_point_map[price_point_id].copy()
-                    detail["territory"] = territory
-                    detail["price_entry_id"] = price_entry_id
-                    price_details.append(detail)
-                    seen_territories.add(territory)
+        if not territory:
+            continue
+        
+        price_point_ref = price_entry.get("relationships", {}).get("subscriptionPricePoint", {}).get("data", {})
+        price_point_id = price_point_ref.get("id")
+        
+        if price_point_id not in price_point_map:
+            continue
+        
+        price_local = price_point_map[price_point_id]["price"]
+        
+        # Convert to USD
+        currency_code = currency_map.get(territory, "USD")
+        price_usd = price_local
+        if currency_code != "USD" and exchange_rates and exchange_rates.rates:
+            converted = exchange_rates.convert_local_to_usd(price_local, currency_code)
+            if converted:
+                price_usd = converted
+        
+        # Filter out placeholder prices (> 2x reasonable price - will be filtered later with base price)
+        # For now, just collect all reasonable prices
+        
+        if territory not in territory_candidates:
+            territory_candidates[territory] = []
+        
+        territory_candidates[territory].append({
+            "territory": territory,
+            "price": price_usd,  # USD price for comparison
+            "price_local": price_local,
+            "currency_code": currency_code,
+            "id": price_point_id,
+            "price_entry_id": price_entry_id,
+            "start_date": start_date,
+            "preserved": preserved,
+            "priority": 0
+        })
+    
+    # Select best price for each territory: active > preserved > scheduled
+    price_details = []
+    for territory, candidates in territory_candidates.items():
+        # Set priority
+        for candidate in candidates:
+            if candidate["start_date"] is None and not candidate["preserved"]:
+                candidate["priority"] = 1  # Active - highest priority
+            elif candidate["preserved"]:
+                candidate["priority"] = 2  # Preserved - medium priority
+            elif candidate["start_date"] and not candidate["preserved"]:
+                candidate["priority"] = 3  # Scheduled - lowest priority
+        
+        # Sort by priority, then by price (ascending)
+        candidates.sort(key=lambda x: (x["priority"], x["price"]))
+        
+        # Use best candidate
+        best = candidates[0]
+        detail = {
+            "territory": best["territory"],
+            "price": best["price"],  # USD price
+            "price_local": best.get("price_local", best["price"]),
+            "currency_code": best.get("currency_code", "USD"),
+            "id": best["id"],
+            "price_entry_id": best["price_entry_id"],
+            "start_date": best.get("start_date")
+        }
+        price_details.append(detail)
     
     return price_details
 
@@ -310,8 +381,8 @@ def find_nearest_price_tier(api, subscription_id, target_price_usd, territory, p
             # Test tier codes in focused range around target price
             # Estimate tier range based on target price (roughly $0.005 per tier unit)
             base_tier = int(target_price_usd / 0.005) if target_price_usd > 0 else 10300
-            # Test ±50 tiers around target (reduced from ±100 for performance)
-            for tier_num in range(max(10000, base_tier - 50), min(11000, base_tier + 50), 10):
+            # Test ±30 tiers around target (optimized for performance)
+            for tier_num in range(max(10000, base_tier - 30), min(11000, base_tier + 30), 10):
                 tier_codes_to_test.add(str(tier_num))
             
             # Prepare parallel requests for tier code testing
@@ -334,9 +405,9 @@ def find_nearest_price_tier(api, subscription_id, target_price_usd, territory, p
                     valid_requests.append(req)
                     valid_indices.append(idx)
             
-            # Make parallel requests (15 concurrent for faster discovery)
+            # Make parallel requests (20 concurrent for faster discovery)
             if valid_requests:
-                results = api._make_parallel_requests(valid_requests, max_workers=15)
+                results = api._make_parallel_requests(valid_requests, max_workers=20)
                 
                 # Process results
                 for result_idx, result in enumerate(results):
@@ -383,13 +454,26 @@ def find_nearest_price_tier(api, subscription_id, target_price_usd, territory, p
 
 def update_subscription_prices(api, calculator, exchange_rates, subscription_id, subscription_name, start_date=None):
     """Update prices for a subscription based on Big Mac Index"""
+    subscription_start_time = time.time()
+    
     print(f"\n{'='*100}")
     print(f"Processing: {subscription_name} (ID: {subscription_id})")
     print(f"{'='*100}")
     
-    # Get current price details
+    # Get current exchange rates first (needed for currency conversion)
+    print("Fetching current exchange rates...")
+    exchange_start = time.time()
+    if not exchange_rates.fetch_current_rates():
+        print("  Warning: Could not fetch exchange rates. Currency conversion may be inaccurate.")
+    exchange_duration = time.time() - exchange_start
+    print(f"  ⏱️  Exchange rates fetched in {format_duration(exchange_duration)}")
+    
+    # Get current price details (with exchange rates for currency conversion)
     print("Fetching current prices...")
-    price_details = get_price_details(api, subscription_id)
+    prices_start = time.time()
+    price_details = get_price_details(api, subscription_id, exchange_rates)
+    prices_duration = time.time() - prices_start
+    print(f"  ⏱️  Prices fetched in {format_duration(prices_duration)}")
     
     if not price_details:
         print("  No prices found. Skipping.")
@@ -404,22 +488,37 @@ def update_subscription_prices(api, calculator, exchange_rates, subscription_id,
     print(f"  USA base price: ${usa_price:.2f} USD")
     print(f"  Found {len(price_details)} price points")
     
+    # Filter out placeholder prices (> 2x base price)
+    max_reasonable_price = usa_price * 2
+    filtered_price_details = []
+    for detail in price_details:
+        price_usd = detail.get("price", 0)
+        if price_usd <= max_reasonable_price:
+            filtered_price_details.append(detail)
+        else:
+            territory = detail.get("territory", "")
+            price_local = detail.get("price_local", price_usd)
+            currency = detail.get("currency_code", "USD")
+            print(f"  ⚠️  Filtered out placeholder price for {territory}: ${price_local:.2f} {currency} (${price_usd:.2f} USD)")
+    
+    price_details = filtered_price_details
+    
     # Get index ratios
     index_name = "Big Mac Index" if calculator.index_type == "bigmac" else "Netflix Index"
     print(f"  Fetching {index_name} ratios...")
     all_ratios = calculator.index.get_all_ratios()
     
-    # Get current exchange rates
-    print("  Fetching current exchange rates...")
-    if not exchange_rates.fetch_current_rates():
-        print("  Warning: Could not fetch exchange rates. Proceeding with Big Mac Index only.")
-    
     # Calculate new prices and prepare updates
     updates = []
     skipped = []
+    territory_times = []
     
     print(f"\n  Calculating new prices...")
-    for detail in price_details:
+    calc_start_time = time.time()
+    cumulative_time = 0
+    
+    for idx, detail in enumerate(price_details, 1):
+        territory_start = time.time()
         territory = detail.get("territory", "")
         current_price = detail.get("price", 0)
         price_entry_id = detail.get("price_entry_id")
@@ -431,6 +530,12 @@ def update_subscription_prices(api, calculator, exchange_rates, subscription_id,
                 "current_price": current_price,
                 "action": "Keep unchanged (base price)"
             })
+            territory_duration = time.time() - territory_start
+            territory_times.append({"territory": territory, "duration": territory_duration})
+            cumulative_time += territory_duration
+            if idx % 10 == 0:
+                print(f"    📊 Processed {idx}/{len(price_details)} territories | "
+                      f"Elapsed: {format_duration(cumulative_time)}")
             continue
         
         # Get index ratio
@@ -478,12 +583,14 @@ def update_subscription_prices(api, calculator, exchange_rates, subscription_id,
         new_price_usd = usa_price * ratio
         
         # Find nearest price tier (matching by USD value, Apple converts to local currency)
+        tier_start = time.time()
         nearest_tier_id = find_nearest_price_tier(api, subscription_id, new_price_usd, territory, price_details, exchange_rates)
+        tier_duration = time.time() - tier_start
         
         if nearest_tier_id:
             updates.append({
                 "territory": territory,
-                "current_price": current_price,  # This is in local currency
+                "current_price": current_price,  # This is in USD (converted)
                 "calculated_price_usd": new_price_usd,  # This is in USD
                 "ratio": ratio,
                 "price_entry_id": price_entry_id,
@@ -496,18 +603,60 @@ def update_subscription_prices(api, calculator, exchange_rates, subscription_id,
                 "calculated_price_usd": new_price_usd,
                 "action": "Could not find matching price tier"
             })
+        
+        territory_duration = time.time() - territory_start
+        territory_times.append({"territory": territory, "duration": territory_duration})
+        cumulative_time += territory_duration
+        
+        # Show progress every 10 territories
+        if idx % 10 == 0:
+            print(f"    📊 Processed {idx}/{len(price_details)} territories | "
+                  f"Elapsed: {format_duration(cumulative_time)}")
+    
+    calc_duration = time.time() - calc_start_time
+    print(f"  ⏱️  Calculation completed in {format_duration(calc_duration)}")
     
     # Display preview
     print(f"\n  Preview of changes:")
-    print(f"  {'Territory':<15} {'Current (local)':<20} {'New (USD)':<15} {'Ratio':<10} {'Status':<20}")
-    print(f"  {'-'*80}")
+    print(f"  {'Territory':<15} {'Current (USD)':<20} {'New (USD)':<15} {'Ratio':<10} {'Time':<12} {'Status':<20}")
+    print(f"  {'-'*100}")
+    
+    # Build territory time lookup
+    territory_time_map = {t["territory"]: t["duration"] for t in territory_times}
     
     for update in updates:
-        print(f"  {update['territory']:<15} {update['current_price']:<20.2f} ${update['calculated_price_usd']:<14.2f} {update['ratio']:<10.3f} Ready to update")
+        # Get current price details for display
+        current_detail = next((d for d in price_details if d.get("territory") == update['territory']), None)
+        territory_time = format_duration(territory_time_map.get(update['territory'], 0))
+        
+        if current_detail:
+            current_price_local = current_detail.get("price_local", update['current_price'])
+            currency = current_detail.get("currency_code", "USD")
+            if currency != "USD":
+                current_display = f"${current_price_local:.2f} {currency} (${update['current_price']:.2f})"
+                print(f"  {update['territory']:<15} {current_display:<20} ${update['calculated_price_usd']:<14.2f} {update['ratio']:<10.3f} {territory_time:<12} Ready to update")
+            else:
+                print(f"  {update['territory']:<15} ${update['current_price']:<19.2f} ${update['calculated_price_usd']:<14.2f} {update['ratio']:<10.3f} {territory_time:<12} Ready to update")
+        else:
+            print(f"  {update['territory']:<15} ${update['current_price']:<19.2f} ${update['calculated_price_usd']:<14.2f} {update['ratio']:<10.3f} {territory_time:<12} Ready to update")
     
     for skip in skipped:
         action = skip.get('action', 'Skipped')
-        print(f"  {skip['territory']:<15} ${skip['current_price']:<14.2f} {'-':<15} {'-':<10} {action}")
+        current_price = skip.get('current_price', 0)
+        territory_time = format_duration(territory_time_map.get(skip['territory'], 0))
+        print(f"  {skip['territory']:<15} ${current_price:<19.2f} {'-':<15} {'-':<10} {territory_time:<12} {action}")
+    
+    # Calculate timing statistics
+    total_territory_time = sum(t["duration"] for t in territory_times)
+    avg_territory_time = total_territory_time / len(territory_times) if territory_times else 0
+    subscription_duration = time.time() - subscription_start_time
+    
+    print(f"\n  ⏱️  TIMING SUMMARY:")
+    print(f"    Exchange rates: {format_duration(exchange_duration)}")
+    print(f"    Fetch prices: {format_duration(prices_duration)}")
+    print(f"    Calculate & find tiers: {format_duration(calc_duration)}")
+    print(f"    Average per territory: {format_duration(avg_territory_time)}")
+    print(f"    Total processing time: {format_duration(subscription_duration)}")
     
     print(f"\n  Summary: {len(updates)} territories ready to update, {len(skipped)} skipped")
     
@@ -519,25 +668,85 @@ def update_subscription_prices(api, calculator, exchange_rates, subscription_id,
             success_count = 0
             error_count = 0
             
-            for update in updates:
+            # Parallelize price updates for faster execution
+            def update_territory(update_item):
                 try:
-                    # Update price with start date
                     result = api.update_subscription_price(
                         subscription_id, 
-                        update['price_point_id'],
+                        update_item['price_point_id'],
                         start_date=start_date
                     )
-                    success_count += 1
-                    print(f"    ✓ Updated {update['territory']} (scheduled for {start_date or 'immediate'})")
+                    return (True, update_item['territory'], None)
                 except Exception as e:
-                    error_count += 1
-                    print(f"    ✗ Error updating {update['territory']}: {e}")
+                    return (False, update_item['territory'], str(e))
+            
+            # Use parallel execution for updates (max 10 concurrent to avoid rate limits)
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = {executor.submit(update_territory, update): update for update in updates}
+                for future in as_completed(futures):
+                    success, territory, error = future.result()
+                    if success:
+                        success_count += 1
+                        print(f"    ✓ Updated {territory} (scheduled for {start_date or 'immediate'})")
+                    else:
+                        error_count += 1
+                        print(f"    ✗ Error updating {territory}: {error}")
             
             print(f"\n  Update complete: {success_count} successful, {error_count} errors")
         else:
             print(f"  Skipped updating {subscription_name}")
     else:
         print(f"  No updates to apply for {subscription_name}")
+
+def estimate_completion_time(api, subscriptions_list, exchange_rates):
+    """Estimate completion time based on subscription count and territories"""
+    print("\n" + "="*100)
+    print("Estimating completion time...")
+    print("="*100)
+    
+    # Fetch exchange rates for currency conversion
+    exchange_rates.fetch_current_rates()
+    
+    # Sample first subscription to estimate territories per subscription
+    sample_sub_id = list(subscriptions_list.keys())[0]
+    try:
+        sample_price_details = get_price_details(api, sample_sub_id, exchange_rates)
+        avg_territories_per_sub = len(sample_price_details) if sample_price_details else 50
+    except:
+        avg_territories_per_sub = 50  # Default estimate
+    
+    total_subscriptions = len(subscriptions_list)
+    estimated_territories = total_subscriptions * avg_territories_per_sub
+    
+    # Time estimates (in seconds) based on operations:
+    # - Fetch price details: ~2-5s per subscription (pagination)
+    # - Find price tier per territory: ~1-3s (with parallel requests)
+    # - Update price per territory: ~0.5-1s (with parallel updates)
+    # - User confirmation time: ~10s per subscription
+    
+    time_per_subscription = {
+        'fetch_prices': 3,  # seconds
+        'find_tiers': avg_territories_per_sub * 1.5,  # seconds (parallelized)
+        'update_prices': avg_territories_per_sub * 0.7,  # seconds (parallelized)
+        'user_confirmation': 10  # seconds
+    }
+    
+    total_seconds = total_subscriptions * sum(time_per_subscription.values())
+    
+    # Add overhead for API rate limiting and retries
+    total_seconds = int(total_seconds * 1.2)  # 20% buffer
+    
+    estimated_duration = timedelta(seconds=total_seconds)
+    estimated_end_time = datetime.now() + estimated_duration
+    
+    print(f"  Subscriptions to process: {total_subscriptions}")
+    print(f"  Estimated territories per subscription: ~{avg_territories_per_sub}")
+    print(f"  Total territories: ~{estimated_territories}")
+    print(f"\n  Estimated completion time: {estimated_duration}")
+    print(f"  Estimated end time: {estimated_end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*100 + "\n")
+    
+    return estimated_duration, estimated_end_time
 
 def main():
     print("="*100)
@@ -602,10 +811,28 @@ def main():
     exchange_rates = ExchangeRates()
     
     # Process each subscription one at a time
-    subscriptions_list = list(SELECTED_SUBSCRIPTIONS.items())
+    subscriptions_list = dict(SELECTED_SUBSCRIPTIONS.items())
     total = len(subscriptions_list)
     
-    for idx, (subscription_id, subscription_name) in enumerate(subscriptions_list, 1):
+    # Estimate completion time before starting
+    estimated_duration, estimated_end_time = estimate_completion_time(api, subscriptions_list, exchange_rates)
+    
+    # Confirm before proceeding
+    response = input("Proceed with price updates? (yes/no): ").strip().lower()
+    if response != 'yes':
+        print("\nCancelled by user.")
+        return
+    
+    start_time = datetime.now()
+    overall_start_time = time.time()
+    print(f"\nStarted at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Expected completion: {estimated_end_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    
+    subscriptions_items = list(subscriptions_list.items())
+    subscription_times = []
+    
+    for idx, (subscription_id, subscription_name) in enumerate(subscriptions_items, 1):
+        subscription_start = time.time()
         print(f"\n{'='*100}")
         print(f"PROCESSING SUBSCRIPTION {idx} of {total}")
         print(f"{'='*100}")
@@ -613,12 +840,22 @@ def main():
         try:
             update_subscription_prices(api, calculator, exchange_rates, subscription_id, subscription_name, start_date)
             
+            subscription_duration = time.time() - subscription_start
+            subscription_times.append({"name": subscription_name, "duration": subscription_duration})
+            cumulative_subscription_time = sum(s["duration"] for s in subscription_times)
+            
+            print(f"\n  ⏱️  Subscription '{subscription_name}' completed in {format_duration(subscription_duration)}")
+            print(f"  📊 Progress: {idx}/{total} subscriptions | Total elapsed: {format_duration(cumulative_subscription_time)}")
+            
             if idx < total:
                 response = input(f"\nContinue to next subscription? (yes/no): ").strip().lower()
                 if response != 'yes':
                     print("\nStopped by user.")
                     break
         except Exception as e:
+            subscription_duration = time.time() - subscription_start
+            subscription_times.append({"name": subscription_name, "duration": subscription_duration})
+            
             print(f"\n  ✗ Error processing {subscription_name}: {e}")
             import traceback
             traceback.print_exc()
@@ -629,8 +866,35 @@ def main():
                     print("\nStopped by user.")
                     break
     
+    end_time = datetime.now()
+    overall_duration = time.time() - overall_start_time
+    actual_duration = end_time - start_time
+    
+    # Calculate subscription timing stats
+    total_subscription_time = sum(s["duration"] for s in subscription_times)
+    avg_subscription_time = total_subscription_time / len(subscription_times) if subscription_times else 0
+    
     print("\n" + "="*100)
     print("All subscriptions processed!")
+    print("="*100)
+    print(f"Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Completed: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"\n⏱️  FINAL TIMING SUMMARY:")
+    print(f"  Actual duration: {format_duration(overall_duration)}")
+    print(f"  Estimated duration: {format_duration(estimated_duration.total_seconds())}")
+    if overall_duration < estimated_duration.total_seconds():
+        time_saved = estimated_duration.total_seconds() - overall_duration
+        print(f"  ✓ Completed {format_duration(time_saved)} faster than estimated!")
+    elif overall_duration > estimated_duration.total_seconds():
+        time_over = overall_duration - estimated_duration.total_seconds()
+        print(f"  ⚠️  Took {format_duration(time_over)} longer than estimated")
+    
+    if subscription_times:
+        print(f"\n  Per-subscription breakdown:")
+        for sub_time in subscription_times:
+            print(f"    • {sub_time['name']}: {format_duration(sub_time['duration'])}")
+        print(f"  Average per subscription: {format_duration(avg_subscription_time)}")
+    
     print("="*100)
 
 if __name__ == "__main__":
